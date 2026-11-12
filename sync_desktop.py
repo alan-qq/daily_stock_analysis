@@ -104,6 +104,11 @@ def sync_to_desktop(slug: str) -> set[str]:
     for day, text in sorted(briefs.items()):
         target = DESKTOP_DIR / f"{day}_简报.md"
         if target.exists() and target.stat().st_size > 200:
+            if target.read_text(encoding="utf-8", errors="ignore") == text:
+                continue
+            target.write_text(text, encoding="utf-8")
+            added.add(day)
+            log(f"已更新 {target.name}（云端版本更新）")
             continue
         target.write_text(text, encoding="utf-8")
         added.add(day)
