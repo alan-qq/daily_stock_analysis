@@ -58,28 +58,9 @@ WATCH_NAMES = {
     "600760": "中航沈飞", "300124": "汇川技术",
 }
 
-# 推荐候选池（与自选不重叠，每天按评分取前 5）
-POOL = [
-    "002371",  # 北方华创 —— 半导体设备
-    "300308",  # 中际旭创 —— 光模块
-    "300502",  # 新易盛 —— 光模块
-    "000977",  # 浪潮信息 —— AI 服务器
-    "601689",  # 拓普集团 —— 汽车零部件
-    "002747",  # 埃斯顿 —— 工业机器人
-    "300059",  # 东方财富 —— 券商
-    "601899",  # 紫金矿业 —— 有色/黄金
-    "601088",  # 中国神华 —— 煤炭
-    "000858",  # 五粮液 —— 白酒
-    "300760",  # 迈瑞医疗 —— 医疗器械
-    "600436",  # 片仔癀 —— 中药
-    "002179",  # 中航光电 —— 军工连接器
-    "300442",  # 润泽科技 —— IDC/算力
-    "002555",  # 三七互娱 —— 游戏
-    "300418",  # 昆仑万维 —— AI 应用
-    "002241",  # 歌尔股份 —— 消费电子
-    "000568",  # 泸州老窖 —— 白酒
-    "601166",  # 兴业银行 —— 银行
-]
+# 推荐池不再固定：每天由 market_scan.py 从全市场快照动态扫描（见 scan_today）。
+# 自选股永远只有上面这 20 只，其余全部按当日行情生成，允许与前一日重复。
+SCAN_TOP_N = 12   # 每日进入 AI 复评的候选数量，最终推荐取前 5
 
 POSITIVE = ("买入", "加仓", "看多")
 NEGATIVE = ("卖出", "减仓", "清仓", "看空")
@@ -118,40 +99,6 @@ def _qt_symbol(code: str) -> str:
     return "sz" + code
 
 
-def kline_hits(code: str, window: int = 60) -> int | None:
-    """近 window 个交易日中，满足多头结构（收盘>MA20 且 MA5>MA10>MA20）的天数。
-
-    数据源为腾讯前复权日 K，用于衡量该股近三个月的趋势稳定性。
-    """
-    import urllib.request
-
-    sym = _qt_symbol(code)
-    url = (
-        "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-        f"?param={sym},day,,,{window + 40},qfq"
-    )
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            payload = json.loads(resp.read().decode("utf-8", "ignore"))
-        node = (payload.get("data") or {}).get(sym) or {}
-        rows = node.get("qfqday") or node.get("day") or []
-        closes = [float(r[2]) for r in rows if len(r) >= 3]
-    except Exception:  # noqa: BLE001
-        return None
-    if len(closes) < 25:
-        return None
-
-    def ma(seq: list[float], i: int, n: int) -> float:
-        return sum(seq[i - n + 1: i + 1]) / n
-
-    flags = []
-    for i in range(19, len(closes)):
-        m5, m10, m20 = ma(closes, i, 5), ma(closes, i, 10), ma(closes, i, 20)
-        flags.append(closes[i] > m20 and m5 > m10 > m20)
-    return sum(flags[-window:])
-
-
 def parse_sectors(path: Path) -> tuple[list, list]:
     """从当日大盘复盘里提取行业板块领涨/领跌 Top5。"""
     if not path.exists():
@@ -176,15 +123,15 @@ def parse_sectors(path: Path) -> tuple[list, list]:
     return grab("行业板块领涨 Top 5"), grab("行业板块领跌 Top 5")
 
 
-def run_analysis() -> int:
+def run_analysis(codes: list[str]) -> int:
     env = dict(os.environ)
     for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         env.pop(key, None)
     env["PYTHONUTF8"] = "1"
-    codes = ",".join(dict.fromkeys(WATCHLIST + POOL))
-    print(f"[brief] 开始分析 {len(codes.split(','))} 只标的…", flush=True)
+    joined = ",".join(dict.fromkeys(codes))
+    print(f"[brief] 开始分析 {len(joined.split(','))} 只标的…", flush=True)
     proc = subprocess.run(
-        [sys.executable, "main.py", "--no-notify", "--stocks", codes],
+        [sys.executable, "main.py", "--no-notify", "--stocks", joined],
         cwd=str(ROOT),
         env=env,
     )
@@ -289,25 +236,44 @@ def build_brief(
     prev_date: date | None,
     hits: dict[str, int | None] | None = None,
     sectors: tuple[list, list] | None = None,
+    candidates: list[dict] | None = None,
+    scan_meta: dict | None = None,
+    prev_picks: list[str] | None = None,
 ) -> str:
     today = date.today().isoformat()
     hits = hits or {}
+    candidates = candidates or []
+    scan_meta = scan_meta or {}
     leading, lagging = sectors or ([], [])
 
     def hit_txt(code: str) -> str:
-        val = hits.get(code)
-        return "—" if val is None else f"{val}/60"
+        v = hits.get(code)
+        if not v:
+            return "—"
+        return f"{v['picks']}次/{v['qual']}天"
+
     watch = [today_rows[c] for c in WATCHLIST if c in today_rows]
-    pool = [today_rows[c] for c in POOL if c in today_rows and c not in WATCHLIST]
-    pool.sort(key=lambda r: (_signal_rank(r), -r["score"]))
-    picks = pool[:5]
+
+    # 推荐：来自当日全市场扫描得到的候选，按「AI 信号 → AI 评分 → 量化初筛分」排
+    cand_pool = []
+    for c in candidates:
+        row = today_rows.get(c["code"])
+        if not row:
+            continue
+        cand_pool.append({**c, **row, "scan_score": c.get("scan_score", 0), "why": c.get("why", [])})
+    cand_pool.sort(key=lambda r: (_signal_rank(r), -r["score"], -r["scan_score"]))
+    picks = cand_pool[:5]
     buy_signals = [r for r in picks if _signal_rank(r) <= 1]
+    unscored = [c for c in candidates if c["code"] not in today_rows]
 
     buy_n = sum(1 for r in watch if any(k in r["signal"] for k in ("买入", "加仓")))
+    universe = scan_meta.get("universe", 0)
+    after = scan_meta.get("after_filter", 0)
     out = [f"# 每日股票简报 · {today}", ""]
     out.append(
         f"**自选 {len(watch)} 只中 {buy_n} 只给出买入/加仓信号**；"
-        f"推荐池 {len(pool)} 只中取评分前 5 作为候选。"
+        f"今日从全市场 {universe} 只中筛出 {after} 只有效标的，"
+        f"取量化评分前 {len(candidates)} 只复评，推荐 {len(picks)} 只。"
     )
     out.append("")
 
@@ -332,23 +298,45 @@ def build_brief(
                    "（多为模型返回格式异常或数据源失败），明日会重新纳入。")
     out.append("")
 
-    out.append("## 二、今日推荐候选（候选池 5 只）")
+    out.append("## 二、今日推荐（全市场扫描 · 每日动态）")
     out.append("")
-    if buy_signals:
-        out.append(f"其中 **{len(buy_signals)} 只**给出买入/加仓信号，可直接进入观察或试仓名单。")
+    if not picks:
+        out.append("- 今日扫描未产出可复评的候选（数据源异常或全市场无符合条件的标的）。")
     else:
-        out.append("**今日候选池无明确买入信号**，以下为相对最优的 5 只，适合跟踪，不宜追高。")
+        if buy_signals:
+            out.append(f"其中 **{len(buy_signals)} 只**给出买入/加仓信号，可进入观察或试仓名单。")
+        else:
+            out.append("**今日候选无明确买入信号**，以下为相对最优的标的，适合跟踪，不宜追高。")
+        out.append("")
+        out.append("| 股票 | 评分 | 信号 | 近三月入选 | 买入区间 | 止损 | 量价理由 |")
+        out.append("| --- | --- | --- | --- | --- | --- | --- |")
+        for r in picks:
+            why = "、".join(r.get("why", [])[:2]) or "-"
+            out.append(
+                f"| {r['name']} {r['code']} | {r['score']} | {r['signal']} | "
+                f"{hit_txt(r['code'])} | {r.get('buy','-')} | {r.get('stop','-')} | {why} |"
+            )
+        if unscored:
+            names = "、".join(f"{c['name']}{c['code']}" for c in unscored[:4])
+            out.append("")
+            out.append(f"> 另有 {len(unscored)} 只候选未产出分析结论（{names} 等），未计入推荐。")
+        if prev_picks:
+            keep = [r for r in picks if r["code"] in prev_picks]
+            fresh = [r for r in picks if r["code"] not in prev_picks]
+            out.append("")
+            if keep:
+                out.append(f"**与上一交易日重合 {len(keep)} 只**："
+                           + "、".join(f"{r['name']}" for r in keep)
+                           + "（趋势延续，可按原计划持有/加仓）；"
+                           + (f"新进 {len(fresh)} 只：" + "、".join(f"{r['name']}" for r in fresh)
+                              if fresh else "今日全部延续"))
+            else:
+                out.append("**今日推荐与上一交易日完全不同**，说明资金主线已切换，"
+                           "昨日标的需重新评估是否继续持有。")
     out.append("")
-    out.append("| 股票 | 评分 | 信号 | 近三月入选 | 买入区间 | 止损 |")
-    out.append("| --- | --- | --- | --- | --- | --- |")
-    for r in picks:
-        out.append(
-            f"| {r['name']} {r['code']} | {r['score']} | {r['signal']} | "
-            f"{hit_txt(r['code'])} | {r.get('buy','-')} | {r.get('stop','-')} |"
-        )
-    out.append("")
-    out.append("> 候选池为固定观察名单（跨赛道龙头，与自选不重叠），非全市场扫描。评分来自本地分析引擎的"
-               "技术/基本面/舆情/环境四维加权，仅供筛选线索。")
+    out.append("> 候选不是固定名单：每日从全市场重新扫描，条件为「成交额≥3亿、流通市值30–1200亿、"
+               "换手1.5%–25%、站上MA20、涨幅未触及涨停」，再按量能/涨幅/均线/位置/流动性加权排序。"
+               "因此同一只票可能连续多日入选，也可能消失。")
     out.append("")
 
     out.append("## 三、重点板块")
@@ -380,9 +368,13 @@ def build_brief(
 
     out.append("## 五、风险提示")
     out.append("")
-    out.append("**「近三月入选」口径**：近 60 个交易日中，该股满足「收盘站上 MA20 且 MA5>MA10>MA20」"
-               "多头结构的天数（满分 60）。数值越高说明近三个月多数时间处于强势结构，"
-               "低于 20 说明长期弱势、反弹多为技术性修复。")
+    out.append("**「近三月入选」口径**：写作 `N次/M天`。"
+               "N = 近 60 个交易日中该股进入每日入选名单的次数（每天 5 个名额，共 300 个位置）；"
+               "M = 该股满足全部入选条件的天数（成交额≥3亿、站上 MA20、涨幅在可买区间且未触涨停、"
+               "换手 1.5%–25%），不受排名限制。"
+               "N 高说明反复被系统选中，属于资金持续关注的方向；"
+               "N=0 但 M>0 说明条件达成过、只是强度不够挤进前 5；两者都接近 0 说明近三个月没有出现买点。"
+               "数值由历史行情逐日复算得出，不是主观打标。")
     out.append("")
     out.append("以上内容由程序 + AI 模型自动生成，仅供研究参考，不构成投资建议。")
     out.append(f"\n生成时间：{datetime.now():%Y-%m-%d %H:%M}")
@@ -447,8 +439,28 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         pass
 
+    import market_scan as ms
+
+    # 1) 全市场动态扫描，得到当日候选（自选股永不被推荐）
+    scan = {"meta": {}, "candidates": []}
     if not args.no_run:
-        code = run_analysis()
+        print("[brief] 全市场扫描开始…", flush=True)
+        try:
+            scan = ms.scan_today(exclude=WATCHLIST, top_n=SCAN_TOP_N)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[brief] 扫描失败：{exc}，本次仅分析自选股", flush=True)
+    else:
+        import json as _json
+        p = ROOT / "cache" / f"scan_{date.today().isoformat()}.json"
+        if p.exists():
+            scan = _json.loads(p.read_text(encoding="utf-8"))
+            print(f"[brief] 复用当日扫描结果：候选 {len(scan.get('candidates', []))} 只", flush=True)
+
+    cand_codes = [c["code"] for c in scan.get("candidates", [])]
+    all_codes = list(dict.fromkeys(WATCHLIST + cand_codes))
+
+    if not args.no_run:
+        code = run_analysis(all_codes)
         if code != 0:
             print(f"[brief] 分析进程返回 {code}，继续尝试解析已有报告", flush=True)
 
@@ -464,15 +476,20 @@ def main() -> int:
         prev_date, prev_path = history[-1]
         prev_rows = parse_report(prev_path)
 
-    codes = list(dict.fromkeys(WATCHLIST + POOL))
-    print(f"[brief] 统计近三月入选天数（{len(codes)} 只）…", flush=True)
-    hits = {c: kline_hits(c) for c in codes}
-    ok = sum(1 for v in hits.values() if v is not None)
-    print(f"[brief] 成功 {ok}/{len(codes)}", flush=True)
-
+    print("[brief] 读取近三月入选次数（回填基线 + 实盘记录）…", flush=True)
+    counts = ms.merged_counts()
+    hits = {c: counts.get(c) for c in all_codes}
+    print(f"[brief] 有历史记录的标的：{sum(1 for v in hits.values() if v)}/{len(all_codes)}", flush=True)
     sectors = parse_sectors(REPORTS / f"market_review_{date.today():%Y%m%d}.md")
 
-    brief = build_brief(today_rows, prev_rows, prev_date, hits=hits, sectors=sectors)
+    # 上一交易日的推荐名单，用于判断延续还是切换
+    hist_days = (ms.load_history().get("days") or {})
+    past = sorted(d for d in hist_days if d < date.today().isoformat())
+    prev_picks = hist_days.get(past[-1], []) if past else []
+
+    brief = build_brief(today_rows, prev_rows, prev_date, hits=hits, sectors=sectors,
+                        candidates=scan.get("candidates", []), scan_meta=scan.get("meta", {}),
+                        prev_picks=prev_picks)
 
     REPORTS.mkdir(exist_ok=True)
     (REPORTS / f"brief_{date.today():%Y%m%d}.md").write_text(brief, encoding="utf-8")
@@ -481,6 +498,15 @@ def main() -> int:
     desktop_file = DESKTOP_DIR / f"{date.today().isoformat()}_简报.md"
     desktop_file.write_text(brief, encoding="utf-8")
     print(f"[brief] 已保存：{desktop_file}")
+
+    # 2) 把当日最终推荐记入历史，供后续「入选次数」累计
+    try:
+        picked = [c["code"] for c in scan.get("candidates", []) if c["code"] in today_rows][:5]
+        if picked:
+            ms.record_today(picked)
+            print(f"[brief] 已记录当日推荐 {len(picked)} 只到 recommend_history.json", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[brief] 记录推荐历史失败：{exc}", flush=True)
 
     print("\n" + "=" * 50 + "\n")
     print(brief)
