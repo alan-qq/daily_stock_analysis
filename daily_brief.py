@@ -25,37 +25,60 @@ DESKTOP_DIR = Path(
     os.getenv("DSA_BRIEF_DESKTOP_DIR", str(Path.home() / "Desktop" / "每日股票分析"))
 )
 
-# 用户自选
-WATCHLIST = ["300364", "603986", "300251", "603533", "002463"]
+# 用户自选（20 只）
+WATCHLIST = [
+    "300364",  # 中文在线 —— 传媒/AI 应用
+    "603986",  # 兆易创新 —— 存储芯片
+    "300251",  # 光线传媒 —— 影视传媒
+    "603533",  # 掌阅科技 —— 数字阅读
+    "002463",  # 沪电股份 —— PCB/AI 算力
+    "688981",  # 中芯国际 —— 半导体制造
+    "688256",  # 寒武纪 —— AI 芯片
+    "601138",  # 工业富联 —— AI 服务器
+    "002475",  # 立讯精密 —— 消费电子
+    "300274",  # 阳光电源 —— 光伏逆变
+    "300750",  # 宁德时代 —— 锂电池
+    "002594",  # 比亚迪 —— 新能源车
+    "600276",  # 恒瑞医药 —— 创新药
+    "603259",  # 药明康德 —— CXO
+    "600519",  # 贵州茅台 —— 白酒
+    "600036",  # 招商银行 —— 银行
+    "601318",  # 中国平安 —— 保险
+    "600900",  # 长江电力 —— 水电红利
+    "600760",  # 中航沈飞 —— 军工
+    "300124",  # 汇川技术 —— 工控/机器人
+]
 WATCH_NAMES = {
-    "300364": "中文在线",
-    "603986": "兆易创新",
-    "300251": "光线传媒",
-    "603533": "掌阅科技",
-    "002463": "沪电股份",
+    "300364": "中文在线", "603986": "兆易创新", "300251": "光线传媒",
+    "603533": "掌阅科技", "002463": "沪电股份", "688981": "中芯国际",
+    "688256": "寒武纪", "601138": "工业富联", "002475": "立讯精密",
+    "300274": "阳光电源", "300750": "宁德时代", "002594": "比亚迪",
+    "600276": "恒瑞医药", "603259": "药明康德", "600519": "贵州茅台",
+    "600036": "招商银行", "601318": "中国平安", "600900": "长江电力",
+    "600760": "中航沈飞", "300124": "汇川技术",
 }
 
-# 推荐候选池（跨赛道龙头，复盘时按评分取前 5）
+# 推荐候选池（与自选不重叠，每天按评分取前 5）
 POOL = [
-    "688981",  # 中芯国际
-    "688256",  # 寒武纪
-    "688041",  # 海光信息
-    "601138",  # 工业富联
-    "002555",  # 三七互娱
-    "002517",  # 恺英网络
-    "300418",  # 昆仑万维
-    "002475",  # 立讯精密
-    "002241",  # 歌尔股份
-    "300750",  # 宁德时代
-    "300274",  # 阳光电源
-    "600276",  # 恒瑞医药
-    "603259",  # 药明康德
-    "600519",  # 贵州茅台
-    "000568",  # 泸州老窖
-    "600036",  # 招商银行
-    "600900",  # 长江电力
-    "600760",  # 中航沈飞
-    "300124",  # 汇川技术
+    "002371",  # 北方华创 —— 半导体设备
+    "300308",  # 中际旭创 —— 光模块
+    "300502",  # 新易盛 —— 光模块
+    "000977",  # 浪潮信息 —— AI 服务器
+    "601689",  # 拓普集团 —— 汽车零部件
+    "002747",  # 埃斯顿 —— 工业机器人
+    "300059",  # 东方财富 —— 券商
+    "601899",  # 紫金矿业 —— 有色/黄金
+    "601088",  # 中国神华 —— 煤炭
+    "000858",  # 五粮液 —— 白酒
+    "300760",  # 迈瑞医疗 —— 医疗器械
+    "600436",  # 片仔癀 —— 中药
+    "002179",  # 中航光电 —— 军工连接器
+    "300442",  # 润泽科技 —— IDC/算力
+    "002555",  # 三七互娱 —— 游戏
+    "300418",  # 昆仑万维 —— AI 应用
+    "002241",  # 歌尔股份 —— 消费电子
+    "000568",  # 泸州老窖 —— 白酒
+    "601166",  # 兴业银行 —— 银行
 ]
 
 POSITIVE = ("买入", "加仓", "看多")
@@ -83,6 +106,74 @@ def _short(text: str, limit: int) -> str:
     """压缩成表内可读的一小段：取第一个价格片段，去掉括号解释。"""
     head = re.split(r"[（(，,、；;]", _clean(text))[0].strip()
     return head[:limit]
+
+
+def _qt_symbol(code: str) -> str:
+    if code.startswith(("60", "68", "90", "51", "58")):
+        return "sh" + code
+    if code.startswith(("00", "30", "20", "15", "16")):
+        return "sz" + code
+    if code.startswith(("4", "8")):
+        return "bj" + code
+    return "sz" + code
+
+
+def kline_hits(code: str, window: int = 60) -> int | None:
+    """近 window 个交易日中，满足多头结构（收盘>MA20 且 MA5>MA10>MA20）的天数。
+
+    数据源为腾讯前复权日 K，用于衡量该股近三个月的趋势稳定性。
+    """
+    import urllib.request
+
+    sym = _qt_symbol(code)
+    url = (
+        "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+        f"?param={sym},day,,,{window + 40},qfq"
+    )
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "ignore"))
+        node = (payload.get("data") or {}).get(sym) or {}
+        rows = node.get("qfqday") or node.get("day") or []
+        closes = [float(r[2]) for r in rows if len(r) >= 3]
+    except Exception:  # noqa: BLE001
+        return None
+    if len(closes) < 25:
+        return None
+
+    def ma(seq: list[float], i: int, n: int) -> float:
+        return sum(seq[i - n + 1: i + 1]) / n
+
+    flags = []
+    for i in range(19, len(closes)):
+        m5, m10, m20 = ma(closes, i, 5), ma(closes, i, 10), ma(closes, i, 20)
+        flags.append(closes[i] > m20 and m5 > m10 > m20)
+    return sum(flags[-window:])
+
+
+def parse_sectors(path: Path) -> tuple[list, list]:
+    """从当日大盘复盘里提取行业板块领涨/领跌 Top5。"""
+    if not path.exists():
+        return [], []
+    text = path.read_text(encoding="utf-8", errors="ignore")
+
+    def grab(title: str) -> list:
+        m = re.search(r"#+\s*" + re.escape(title) + r"(.*?)(?=\n#{2,}|\Z)", text, re.S)
+        if not m:
+            return []
+        out = []
+        for line in m.group(1).splitlines():
+            line = line.strip()
+            if not line.startswith("|"):
+                continue
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) < 3 or cells[0] in ("排名", "") or set(cells[0]) <= {"-", ":"}:
+                continue
+            out.append((cells[1], cells[2]))
+        return out[:5]
+
+    return grab("行业板块领涨 Top 5"), grab("行业板块领跌 Top 5")
 
 
 def run_analysis() -> int:
@@ -192,8 +283,20 @@ def review(prev: dict[str, dict], today: dict[str, dict]) -> list[str]:
     return lines
 
 
-def build_brief(today_rows: dict[str, dict], prev_rows: dict[str, dict], prev_date: date | None) -> str:
+def build_brief(
+    today_rows: dict[str, dict],
+    prev_rows: dict[str, dict],
+    prev_date: date | None,
+    hits: dict[str, int | None] | None = None,
+    sectors: tuple[list, list] | None = None,
+) -> str:
     today = date.today().isoformat()
+    hits = hits or {}
+    leading, lagging = sectors or ([], [])
+
+    def hit_txt(code: str) -> str:
+        val = hits.get(code)
+        return "—" if val is None else f"{val}/60"
     watch = [today_rows[c] for c in WATCHLIST if c in today_rows]
     pool = [today_rows[c] for c in POOL if c in today_rows and c not in WATCHLIST]
     pool.sort(key=lambda r: (_signal_rank(r), -r["score"]))
@@ -210,12 +313,12 @@ def build_brief(today_rows: dict[str, dict], prev_rows: dict[str, dict], prev_da
 
     out.append("## 一、自选股")
     out.append("")
-    out.append("| 股票 | 评分 | 信号 | 趋势 | 收盘 | 买入区间 | 止损 |")
+    out.append("| 股票 | 评分 | 信号 | 收盘 | 近三月入选 | 买入区间 | 止损 |")
     out.append("| --- | --- | --- | --- | --- | --- | --- |")
     for r in watch:
         out.append(
-            f"| {r['name']} {r['code']} | {r['score']} | {r['signal']} | {r.get('trend','-')} | "
-            f"{r.get('close','-')} | {r.get('buy','-')} | {r.get('stop','-')} |"
+            f"| {r['name']} {r['code']} | {r['score']} | {r['signal']} | "
+            f"{r.get('close','-')} | {hit_txt(r['code'])} | {r.get('buy','-')} | {r.get('stop','-')} |"
         )
     out.append("")
     out.append("**要点：**")
@@ -236,19 +339,35 @@ def build_brief(today_rows: dict[str, dict], prev_rows: dict[str, dict], prev_da
     else:
         out.append("**今日候选池无明确买入信号**，以下为相对最优的 5 只，适合跟踪，不宜追高。")
     out.append("")
-    out.append("| 股票 | 评分 | 信号 | 买入区间 | 止损 |")
-    out.append("| --- | --- | --- | --- | --- |")
+    out.append("| 股票 | 评分 | 信号 | 近三月入选 | 买入区间 | 止损 |")
+    out.append("| --- | --- | --- | --- | --- | --- |")
     for r in picks:
         out.append(
             f"| {r['name']} {r['code']} | {r['score']} | {r['signal']} | "
-            f"{r.get('buy','-')} | {r.get('stop','-')} |"
+            f"{hit_txt(r['code'])} | {r.get('buy','-')} | {r.get('stop','-')} |"
         )
     out.append("")
-    out.append("> 候选池为固定观察名单（跨赛道龙头），非全市场扫描。评分来自本地分析引擎的"
+    out.append("> 候选池为固定观察名单（跨赛道龙头，与自选不重叠），非全市场扫描。评分来自本地分析引擎的"
                "技术/基本面/舆情/环境四维加权，仅供筛选线索。")
     out.append("")
 
-    out.append("## 三、上期复盘")
+    out.append("## 三、重点板块")
+    out.append("")
+    if leading or lagging:
+        out.append("| 领涨板块 | 涨幅 | 领跌板块 | 跌幅 |")
+        out.append("| --- | --- | --- | --- |")
+        for i in range(max(len(leading), len(lagging))):
+            a = leading[i] if i < len(leading) else ("-", "-")
+            b = lagging[i] if i < len(lagging) else ("-", "-")
+            out.append(f"| {a[0]} | {a[1]} | {b[0]} | {b[1]} |")
+        out.append("")
+        out.append("> 领涨集中在低位小市值方向时不追；领跌若是同大类多个子行业同步下挫（链条式扩散），"
+                   "相关自选股即使当日红盘也应减仓。")
+    else:
+        out.append("- 今日大盘复盘的板块数据缺失，未取到行业排行。")
+    out.append("")
+
+    out.append("## 四、上期复盘")
     out.append("")
     if prev_date and prev_rows:
         out.append(f"对比基准：{prev_date.isoformat()} 报告")
@@ -259,9 +378,13 @@ def build_brief(today_rows: dict[str, dict], prev_rows: dict[str, dict], prev_da
         out.append("- 暂无历史报告，今日为首期，明日起自动生成复盘。")
     out.append("")
 
-    out.append("## 四、风险提示")
+    out.append("## 五、风险提示")
     out.append("")
-    out.append("以上内容由本地程序 + AI 模型自动生成，仅供研究参考，不构成投资建议。")
+    out.append("**「近三月入选」口径**：近 60 个交易日中，该股满足「收盘站上 MA20 且 MA5>MA10>MA20」"
+               "多头结构的天数（满分 60）。数值越高说明近三个月多数时间处于强势结构，"
+               "低于 20 说明长期弱势、反弹多为技术性修复。")
+    out.append("")
+    out.append("以上内容由程序 + AI 模型自动生成，仅供研究参考，不构成投资建议。")
     out.append(f"\n生成时间：{datetime.now():%Y-%m-%d %H:%M}")
     return "\n".join(out)
 
@@ -341,7 +464,15 @@ def main() -> int:
         prev_date, prev_path = history[-1]
         prev_rows = parse_report(prev_path)
 
-    brief = build_brief(today_rows, prev_rows, prev_date)
+    codes = list(dict.fromkeys(WATCHLIST + POOL))
+    print(f"[brief] 统计近三月入选天数（{len(codes)} 只）…", flush=True)
+    hits = {c: kline_hits(c) for c in codes}
+    ok = sum(1 for v in hits.values() if v is not None)
+    print(f"[brief] 成功 {ok}/{len(codes)}", flush=True)
+
+    sectors = parse_sectors(REPORTS / f"market_review_{date.today():%Y%m%d}.md")
+
+    brief = build_brief(today_rows, prev_rows, prev_date, hits=hits, sectors=sectors)
 
     REPORTS.mkdir(exist_ok=True)
     (REPORTS / f"brief_{date.today():%Y%m%d}.md").write_text(brief, encoding="utf-8")
