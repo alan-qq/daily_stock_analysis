@@ -27,6 +27,13 @@ DESKTOP_DIR = Path(
 
 # 用户自选
 WATCHLIST = ["300364", "603986", "300251", "603533", "002463"]
+WATCH_NAMES = {
+    "300364": "中文在线",
+    "603986": "兆易创新",
+    "300251": "光线传媒",
+    "603533": "掌阅科技",
+    "002463": "沪电股份",
+}
 
 # 推荐候选池（跨赛道龙头，复盘时按评分取前 5）
 POOL = [
@@ -214,6 +221,12 @@ def build_brief(today_rows: dict[str, dict], prev_rows: dict[str, dict], prev_da
     out.append("**要点：**")
     for r in watch:
         out.append(f"- **{r['name']}**：{r.get('one_liner', r['signal'])}")
+    missing = [c for c in WATCHLIST if c not in today_rows]
+    if missing:
+        names = "、".join(f"{WATCH_NAMES.get(c, '')}{c}" for c in missing)
+        out.append("")
+        out.append(f"> ⚠️ 今日 {len(missing)} 只自选未能生成分析：{names}"
+                   "（多为模型返回格式异常或数据源失败），明日会重新纳入。")
     out.append("")
 
     out.append("## 二、今日推荐候选（候选池 5 只）")
