@@ -31,7 +31,7 @@ DESKTOP_DIR = Path(
 )
 LOG = Path(os.getenv("DSA_SYNC_LOG", str(ROOT / "sync_desktop.log")))
 KEEP_DAYS = 10
-LOCAL_RUN_AFTER_HOUR = 19
+LOCAL_RUN_AFTER_HOUR = 20
 
 
 def log(msg: str) -> None:
